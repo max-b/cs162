@@ -97,6 +97,38 @@ int lookup(char cmd[]) {
   return -1;
 }
 
+/* Executes non-built in command */
+int execute(struct tokens *tokens) {
+  char *args[1024];
+  pid_t cpid;
+  int exec_result;
+
+  /* get path from first argument */
+  char *path = tokens_get_token(tokens, 0);
+  size_t num_tokens = tokens_get_length(tokens);
+
+  size_t i = 0;
+  for (i = 0; i < num_tokens; i++) {
+    args[i] = tokens_get_token(tokens, i);
+  }
+  args[i] = NULL;
+
+  cpid = fork();
+
+  if (cpid > 0) {
+    /* parent process */
+    wait(&cpid);
+  } else if (cpid == 0) {
+    /* child process */
+    exec_result = execv(path, args);
+    if (exec_result == -1) {
+      fprintf(stdout, "Error running %s. Error: %s\n", path, strerror(errno));
+    }
+    exit(1);
+  }
+  return 0;
+}
+
 /* Intialization procedures for this shell */
 void init_shell() {
   /* Our shell is connected to standard input. */
@@ -144,7 +176,8 @@ int main(unused int argc, unused char *argv[]) {
       cmd_table[fundex].fun(tokens);
     } else {
       /* REPLACE this to run commands as programs. */
-      fprintf(stdout, "This shell doesn't know how to run programs.\n");
+      fprintf(stdout, "Attempting to run: %s\n", tokens_get_token(tokens, 0));
+      execute(tokens);
     }
 
     if (shell_is_interactive)
