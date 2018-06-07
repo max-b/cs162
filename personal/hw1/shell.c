@@ -100,11 +100,12 @@ int lookup(char cmd[]) {
 /* Executes non-built in command */
 int execute(struct tokens *tokens) {
   char *args[1024];
+  char* env_paths;
   pid_t cpid;
   int exec_result;
 
   /* get path from first argument */
-  char *path = tokens_get_token(tokens, 0);
+  char *path_arg = tokens_get_token(tokens, 0);
   size_t num_tokens = tokens_get_length(tokens);
 
   size_t i = 0;
@@ -120,9 +121,22 @@ int execute(struct tokens *tokens) {
     wait(&cpid);
   } else if (cpid == 0) {
     /* child process */
-    exec_result = execv(path, args);
+    env_paths = getenv ("PATH");
+    if (env_paths != NULL) {
+      char *env_path = strtok(env_paths, ":");
+      while(env_path) {
+        char full_path[1024];
+        strncpy(full_path, env_path, 1024);
+        strcat(full_path, "/");
+        strncat(full_path, path_arg, 1024 - strlen(full_path));
+        exec_result = execv(full_path, args);
+        env_path = strtok(NULL, ":");
+      }
+    }
+
+    exec_result = execv(path_arg, args);
     if (exec_result == -1) {
-      fprintf(stdout, "Error running %s. Error: %s\n", path, strerror(errno));
+      fprintf(stdout, "Error running %s. Error: %s\n", path_arg, strerror(errno));
     }
     exit(1);
   }
