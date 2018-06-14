@@ -27,6 +27,52 @@ struct termios shell_tmodes;
 /* Process group id for the shell */
 pid_t shell_pgid;
 
+void write_to_file(int pipe, char *filename) {
+  FILE *fd_in, *fd_out;
+  fd_out = fopen(filename, "w");
+  if (!fd_out) {
+    fprintf(stdout, "Error opening file: %s. Error: %s\n", filename, strerror(errno));
+    return;
+  }
+
+  fd_in = fdopen(pipe, "r");
+  if (!fd_in) {
+    fprintf(stdout, "Error opening pipe. Error: %s\n", strerror(errno));
+    return;
+  }
+
+  int c;
+  while ((c = fgetc(fd_in)) != EOF) {
+    fputc(c, fd_out);
+  }
+
+  fclose(fd_out);
+  fclose(fd_in);
+}
+
+void read_from_file(int pipe, char *filename) {
+  FILE *fd_in, *fd_out;
+  fd_in = fopen(filename, "r");
+  if (!fd_in) {
+    fprintf(stdout, "Error opening file: %s. Error: %s\n", filename, strerror(errno));
+    return;
+  }
+
+  fd_out = fdopen(pipe, "w");
+  if (!fd_out) {
+    fprintf(stdout, "Error opening pipe. Error: %s\n", strerror(errno));
+    return;
+  }
+
+  int c;
+  while ((c = fgetc(fd_in)) != EOF) {
+    fputc(c, fd_out);
+  }
+
+  fclose(fd_out);
+  fclose(fd_in);
+}
+
 int cmd_exit(struct tokens *tokens);
 int cmd_help(struct tokens *tokens);
 int cmd_pwd(struct tokens *tokens);
@@ -100,9 +146,16 @@ int lookup(char cmd[]) {
 /* Executes non-built in command */
 int execute(struct tokens *tokens) {
   char *args[1024];
-  char* env_paths;
+  char *env_paths;
+  char *output_arg;
+  char *input_arg;
+  int has_output = 0;
+  int has_input = 0;
+  int pipefd[2];
   pid_t cpid;
+  pid_t cpid2;
   int exec_result;
+  int child_status = 0;
 
   /* get path from first argument */
   char *path_arg = tokens_get_token(tokens, 0);
@@ -110,17 +163,73 @@ int execute(struct tokens *tokens) {
 
   size_t i = 0;
   for (i = 0; i < num_tokens; i++) {
-    args[i] = tokens_get_token(tokens, i);
+    char *arg = tokens_get_token(tokens, i);
+    if (strncmp(arg, ">", 1) == 0) {
+      output_arg = tokens_get_token(tokens, i+1);
+      has_output = 1;
+      break;
+    } else if (strncmp(arg, "<", 1) == 0) {
+      input_arg = tokens_get_token(tokens, i+1);
+      has_input = 1;
+      break;
+    } else {
+      args[i] = arg;
+    }
   }
   args[i] = NULL;
+
+  if (pipe(pipefd) == -1) {
+    fprintf(stdout, "Error creating pipe. Error: %s\n", strerror(errno));
+  }
 
   cpid = fork();
 
   if (cpid > 0) {
     /* parent process */
-    wait(&cpid);
+    close(pipefd[1]);
+
+    if (has_output) {
+      write_to_file(pipefd[0], output_arg);
+    }
+
+    close(pipefd[0]);
+
+    wait(&child_status);
   } else if (cpid == 0) {
     /* child process */
+
+    if (has_output) {
+      if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
+        fprintf(stdout, "Error duplicating pipe. Error: %s\n", strerror(errno));
+        return 1;
+      }
+    }
+
+    if (has_input) {
+      if (dup2(pipefd[0], STDIN_FILENO) == -1) {
+        fprintf(stdout, "Error duplicating pipe. Error: %s\n", strerror(errno));
+        return 1;
+      }
+
+      cpid2 = fork();
+      if (cpid2 == 0) {
+        /* child */
+        read_from_file(pipefd[1], input_arg);
+        close(pipefd[1]);
+        close(pipefd[0]);
+        exit(0);
+      } else if (cpid2 > 0) {
+        /* parent */
+        waitpid(cpid2, &child_status, 0);
+      } else {
+        /* error */
+        fprintf(stdout, "Error executing fork. Error: %s\n", strerror(errno));
+      }
+    }
+
+    close(pipefd[1]);
+    close(pipefd[0]);
+
     env_paths = getenv ("PATH");
     if (env_paths != NULL) {
       char *env_path = strtok(env_paths, ":");
@@ -138,8 +247,13 @@ int execute(struct tokens *tokens) {
     if (exec_result == -1) {
       fprintf(stdout, "Error running %s. Error: %s\n", path_arg, strerror(errno));
     }
+
     exit(1);
+  } else {
+    /* error */
+    fprintf(stdout, "Error running %s. Error: %s\n", path_arg, strerror(errno));
   }
+
   return 0;
 }
 
