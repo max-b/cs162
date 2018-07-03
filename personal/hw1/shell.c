@@ -27,6 +27,22 @@ struct termios shell_tmodes;
 /* Process group id for the shell */
 pid_t shell_pgid;
 
+/* Simple utility struct and accompanying function
+ * to dynamically add to list of processes */
+struct processes {
+  size_t i;
+  pid_t *all_processes;
+};
+
+void push(struct processes *p, pid_t p0) {
+  p->i++;
+  p->all_processes = realloc(p->all_processes, sizeof(pid_t) * p->i);
+  p->all_processes[p->i - 1] = p0;
+}
+
+/* Backgrounded process groups */
+struct processes *background_processes;
+
 void write_to_file(int pipe, char *filename) {
   FILE *fd_in, *fd_out;
   fd_out = fopen(filename, "w");
@@ -73,10 +89,14 @@ void read_from_file(int pipe, char *filename) {
   fclose(fd_in);
 }
 
+void init_shell();
+void cleanup_shell();
+
 int cmd_exit(struct tokens *tokens);
 int cmd_help(struct tokens *tokens);
 int cmd_pwd(struct tokens *tokens);
 int cmd_cd(struct tokens *tokens);
+int cmd_wait(struct tokens *tokens);
 
 /* Built-in command functions take token array (see parse.h) and return int */
 typedef int cmd_fun_t(struct tokens *tokens);
@@ -91,6 +111,7 @@ typedef struct fun_desc {
 fun_desc_t cmd_table[] = {
   {cmd_pwd, "pwd", "show current working directory"},
   {cmd_cd, "cd", "enter directory"},
+  {cmd_wait, "wait", "wait for backgrounded processes"},
   {cmd_help, "?", "show this help menu"},
   {cmd_exit, "exit", "exit the command shell"},
 };
@@ -104,6 +125,7 @@ int cmd_help(unused struct tokens *tokens) {
 
 /* Exits this shell */
 int cmd_exit(unused struct tokens *tokens) {
+  cleanup_shell();
   exit(0);
 }
 
@@ -135,6 +157,25 @@ int cmd_cd(struct tokens *tokens) {
 
 }
 
+int cmd_wait(unused struct tokens *tokens) {
+  /* wait for background processes to clean up potential zombies */
+  size_t i;
+  int child_status = 0;
+
+  fprintf(stdout, "Waiting for children.\n");
+
+  for (i = 0; i < background_processes->i; i++) {
+    waitpid(background_processes->all_processes[i], &child_status, 0);
+  }
+
+  fprintf(stdout, "All children returned.\n");
+
+  free(background_processes);
+  background_processes = calloc(1, sizeof(struct processes));
+
+  return 0;
+}
+
 /* Looks up the built-in command, if it exists. */
 int lookup(char cmd[]) {
   for (unsigned int i = 0; i < sizeof(cmd_table) / sizeof(fun_desc_t); i++)
@@ -149,34 +190,42 @@ int execute(struct tokens *tokens) {
   char *env_paths;
   char *output_arg;
   char *input_arg;
-  int has_output = 0;
-  int has_input = 0;
+  bool has_output = false;
+  bool has_input = false;
   int pipefd[2];
   pid_t pid;
   pid_t cpid;
   pid_t cpid2;
   int exec_result;
   int child_status = 0;
+  bool background_process = false;
+
+  size_t i = 0;
 
   /* get path from first argument */
   char *path_arg = tokens_get_token(tokens, 0);
   size_t num_tokens = tokens_get_length(tokens);
 
-  size_t i = 0;
   for (i = 0; i < num_tokens; i++) {
     char *arg = tokens_get_token(tokens, i);
     if (strncmp(arg, ">", 1) == 0) {
       output_arg = tokens_get_token(tokens, i+1);
-      has_output = 1;
+      has_output = true;
       break;
     } else if (strncmp(arg, "<", 1) == 0) {
       input_arg = tokens_get_token(tokens, i+1);
-      has_input = 1;
+      has_input = true;
       break;
     } else {
       args[i] = arg;
     }
   }
+
+  if (*args[i-1] == '&') {
+    background_process = true;
+    args[i-1] = NULL;
+  }
+
   args[i] = NULL;
 
   if (pipe(pipefd) == -1) {
@@ -197,7 +246,11 @@ int execute(struct tokens *tokens) {
 
     close(pipefd[0]);
 
-    waitpid(cpid, &child_status, 0);
+    if (!background_process) {
+      waitpid(cpid, &child_status, 0);
+    } else {
+      push(background_processes, cpid);
+    }
 
     if (tcsetpgrp(STDIN_FILENO, pid) == -1) {
       fprintf(stdout, "Error in tcsetpgrp. Error: %s\n", strerror(errno));
@@ -211,24 +264,28 @@ int execute(struct tokens *tokens) {
     if (setpgid(cpid, cpid)) {
       fprintf(stdout, "Error in setpgid. Error: %s\n", strerror(errno));
     }
-    if (tcsetpgrp(STDIN_FILENO, cpid) == -1) {
-      fprintf(stdout, "Error in tcsetpgrp. Error: %s\n", strerror(errno));
-    }
 
-    if (signal(SIGTTOU, SIG_DFL) == SIG_ERR) {
-      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
-    }
+    if (!background_process) {
 
-    if (signal(SIGTSTP, SIG_DFL) == SIG_ERR) {
-      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
-    }
+      if (tcsetpgrp(STDIN_FILENO, cpid) == -1) {
+        fprintf(stdout, "Error in tcsetpgrp. Error: %s\n", strerror(errno));
+      }
 
-    if (signal(SIGINT, SIG_DFL) == SIG_ERR) {
-      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
-    }
+      if (signal(SIGTTOU, SIG_DFL) == SIG_ERR) {
+        fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+      }
 
-    if (signal(SIGTTIN, SIG_DFL) == SIG_ERR) {
-      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+      if (signal(SIGTSTP, SIG_DFL) == SIG_ERR) {
+        fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+      }
+
+      if (signal(SIGINT, SIG_DFL) == SIG_ERR) {
+        fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+      }
+
+      if (signal(SIGTTIN, SIG_DFL) == SIG_ERR) {
+        fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+      }
     }
 
     if (has_output) {
@@ -314,6 +371,20 @@ void init_shell() {
     /* Save the current termios to a variable, so it can be restored later. */
     tcgetattr(shell_terminal, &shell_tmodes);
   }
+
+  background_processes = calloc(1, sizeof(struct processes));
+}
+
+/* Intialization procedures for this shell */
+void cleanup_shell() {
+  size_t i;
+  int child_status = 0;
+
+  for (i = 0; i < background_processes->i; i++) {
+    waitpid(background_processes->all_processes[i], &child_status, 0);
+  }
+
+  free(background_processes);
 }
 
 int main(unused int argc, unused char *argv[]) {
@@ -365,5 +436,6 @@ int main(unused int argc, unused char *argv[]) {
     tokens_destroy(tokens);
   }
 
+  cleanup_shell();
   return 0;
 }
