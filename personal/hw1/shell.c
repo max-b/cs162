@@ -152,6 +152,7 @@ int execute(struct tokens *tokens) {
   int has_output = 0;
   int has_input = 0;
   int pipefd[2];
+  pid_t pid;
   pid_t cpid;
   pid_t cpid2;
   int exec_result;
@@ -188,15 +189,47 @@ int execute(struct tokens *tokens) {
     /* parent process */
     close(pipefd[1]);
 
+    pid = getpid();
+
     if (has_output) {
       write_to_file(pipefd[0], output_arg);
     }
 
     close(pipefd[0]);
 
-    wait(&child_status);
+    waitpid(cpid, &child_status, 0);
+
+    if (tcsetpgrp(STDIN_FILENO, pid) == -1) {
+      fprintf(stdout, "Error in tcsetpgrp. Error: %s\n", strerror(errno));
+    }
+
   } else if (cpid == 0) {
     /* child process */
+
+    cpid = getpid();
+
+    if (setpgid(cpid, cpid)) {
+      fprintf(stdout, "Error in setpgid. Error: %s\n", strerror(errno));
+    }
+    if (tcsetpgrp(STDIN_FILENO, cpid) == -1) {
+      fprintf(stdout, "Error in tcsetpgrp. Error: %s\n", strerror(errno));
+    }
+
+    if (signal(SIGTTOU, SIG_DFL) == SIG_ERR) {
+      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+    }
+
+    if (signal(SIGTSTP, SIG_DFL) == SIG_ERR) {
+      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+    }
+
+    if (signal(SIGINT, SIG_DFL) == SIG_ERR) {
+      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+    }
+
+    if (signal(SIGTTIN, SIG_DFL) == SIG_ERR) {
+      fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+    }
 
     if (has_output) {
       if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
@@ -292,6 +325,22 @@ int main(unused int argc, unused char *argv[]) {
   /* Please only print shell prompts when standard input is not a tty */
   if (shell_is_interactive)
     fprintf(stdout, "%d: ", line_num);
+
+  if (signal(SIGTTOU, SIG_IGN) == SIG_ERR) {
+    fprintf(stdout, "Error handling SIGTTOU signal. Error: %s\n", strerror(errno));
+  }
+
+  if (signal(SIGTSTP, SIG_IGN) == SIG_ERR) {
+    fprintf(stdout, "Error handling SIGTSTP signal. Error: %s\n", strerror(errno));
+  }
+
+  if (signal(SIGINT, SIG_IGN) == SIG_ERR) {
+    fprintf(stdout, "Error handling signal. Error: %s\n", strerror(errno));
+  }
+
+  if (signal(SIGTTIN, SIG_IGN) == SIG_ERR) {
+    fprintf(stdout, "Error handling SIGTTIN signal. Error: %s\n", strerror(errno));
+  }
 
   while (fgets(line, 4096, stdin)) {
     /* Split our line into words. */
