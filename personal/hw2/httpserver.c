@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -33,6 +34,104 @@ int server_proxy_port;
 
 
 /*
+ * Takes a stream (fd), and writes 404 HTTP response
+ */
+void send_not_found_response(int fd) {
+  http_start_response(fd, 404);
+  http_send_header(fd, "Content-Type", "text/html");
+  http_end_headers(fd);
+  http_send_string(fd, "<center><h1>404 Not Found</h1><hr></center>");
+}
+
+/*
+ * Takes a stream (fd), and writes 500 HTTP response
+ */
+void send_error_response(int fd) {
+  http_start_response(fd, 500);
+  http_send_header(fd, "Content-Type", "text/html");
+  http_end_headers(fd);
+  http_send_string(fd, "<center><h1>Server Error</h1><hr></center>");
+}
+
+/*
+ * Takes a stream (fd), and a valid file path of a directory
+ * and responds with a file listing
+ */
+void send_dir_listing(int fd, char *path) {
+  struct dirent *d;
+  int ret;
+  DIR *dir = opendir(path);
+  char formatted_path[strlen(path) + 1024];
+  if (!dir) {
+    send_error_response(fd);
+    return;
+  }
+
+  http_start_response(fd, 200);
+  http_send_header(fd, "Content-Type", "text/html");
+  http_end_headers(fd);
+  http_send_string(fd, "<center><h1>Directory Listing</h1><hr></center>");
+
+  sprintf(formatted_path, "<h2>contents of %s </h2>", path);
+  http_send_string(fd, formatted_path);
+
+  while((d = readdir(dir))) {
+
+    sprintf(formatted_path, "<h3><a href=\"%s\">%s</a></h3>", d->d_name, d->d_name);
+    http_send_string(fd, formatted_path);
+  }
+
+
+  ret = closedir(dir);
+  if (ret) {
+    fprintf(stderr, "Error in closedir: error %d: %s\n", errno, strerror(errno));
+  }
+}
+
+/*
+ * Takes a stream (fd), and a valid file path
+ * and responds with file data and mimetype
+ */
+void send_file_response(int fd, char *path) {
+  struct stat sb;
+  int ret;
+  FILE *file;
+  int READ_SIZE = 1024;
+  char buf[READ_SIZE];
+  char file_length[64]; // File size must be less than 10^64 bytes (seems safe...)
+  int nr;
+  char *mimetype = http_get_mime_type(path);
+
+  ret = stat(path, &sb);
+  if (ret) {
+    fprintf(stderr, "Error in stat: error %d: %s\n", errno, strerror(errno));
+    send_error_response(fd);
+    return;
+  }
+
+  fprintf(stdout, "File size: %d\n", (int) sb.st_size);
+  sprintf(file_length, "%ld", sb.st_size);
+
+  file = fopen(path, "r");
+  if (!file) {
+    fprintf(stderr, "Error in fopen: error %d: %s\n", errno, strerror(errno));
+    send_error_response(fd);
+    return;
+  }
+
+  http_start_response(fd, 200);
+  http_send_header(fd, "Content-Type", mimetype);
+  http_send_header(fd, "Content-Length", file_length);
+  http_end_headers(fd);
+
+  while ((nr = fread(buf, sizeof(char), READ_SIZE, file)) > 0) {
+    http_send_data(fd, buf, nr * sizeof(char));
+  }
+
+  fclose(file);
+}
+
+/*
  * Reads an HTTP request from stream (fd), and writes an HTTP response
  * containing:
  *
@@ -44,23 +143,61 @@ int server_proxy_port;
  *   4) Send a 404 Not Found response.
  */
 void handle_files_request(int fd) {
-
-  /*
-   * TODO: Your solution for Task 1 goes here! Feel free to delete/modify *
-   * any existing code.
-   */
+  struct stat sb;
+  int ret;
 
   struct http_request *request = http_request_parse(fd);
 
-  http_start_response(fd, 200);
-  http_send_header(fd, "Content-Type", "text/html");
-  http_end_headers(fd);
-  http_send_string(fd,
-      "<center>"
-      "<h1>Welcome to httpserver!</h1>"
-      "<hr>"
-      "<p>Nothing's here yet.</p>"
-      "</center>");
+  char relative_path[PATH_MAX] = "./files";
+  char index_path[PATH_MAX];
+
+  strncat(relative_path, request->path, PATH_MAX - 19); // 19 to support 8 bytes from  "./files" and 11 bytes from "/index.html"
+
+  ret = stat(relative_path, &sb);
+
+  if (ret) {
+    if (errno == ENOENT) {
+      // Respond with 404
+      fprintf(stdout, "Sending not found response for path: %s\n", relative_path);
+      send_not_found_response(fd);
+    } else {
+      fprintf(stderr, "Cannot stat path: error %d: %s\n", errno, strerror(errno));
+      send_error_response(fd);
+    }
+  } else if (S_ISDIR(sb.st_mode)) {
+    fprintf(stdout, "directory\n");
+    fprintf(stdout, "relative_path: %s\n", relative_path);
+
+    strcpy(index_path, relative_path);
+    strcat(index_path, "/index.html");
+
+    fprintf(stdout, "index path to check is: %s\n", index_path);
+    ret = stat(index_path, &sb);
+
+    if (ret) {
+      if (errno == ENOENT) {
+        send_dir_listing(fd, relative_path);
+      } else {
+        fprintf(stderr, "Cannot stat path: error %d: %s\n", errno, strerror(errno));
+        send_error_response(fd);
+      }
+    } else {
+      if (S_ISREG(sb.st_mode)) {
+        fprintf(stdout, "Sending file response for path: %s\n", index_path);
+        send_file_response(fd, index_path);
+      }
+    }
+
+  } else if (S_ISREG(sb.st_mode)) {
+    // respond with file from relative_path
+    fprintf(stdout, "Regular file\n");
+    fprintf(stdout, "Sending file response for path: %s\n", relative_path);
+    send_file_response(fd, relative_path);
+  }
+
+  free(request->path);
+  free(request->method);
+  free(request);
 }
 
 
@@ -78,7 +215,7 @@ void handle_files_request(int fd) {
 void handle_proxy_request(int fd) {
 
   /*
-  * The code below does a DNS lookup of server_proxy_hostname and 
+  * The code below does a DNS lookup of server_proxy_hostname and
   * opens a connection to it. Please do not modify.
   */
 
@@ -191,9 +328,6 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
     request_handler(client_socket_number);
     close(client_socket_number);
 
-    printf("Accepted connection from %s on port %d\n",
-        inet_ntoa(client_address.sin_addr),
-        client_address.sin_port);
   }
 
   shutdown(*socket_number, SHUT_RDWR);

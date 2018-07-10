@@ -20,6 +20,9 @@
 #ifndef LIBHTTP_H
 #define LIBHTTP_H
 
+/* Function for error handling */
+void http_fatal_error(char *message);
+
 /*
  * Functions for parsing an HTTP request.
  */
