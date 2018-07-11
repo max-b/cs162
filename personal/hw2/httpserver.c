@@ -14,7 +14,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <unistd.h>
 
 #include "libhttp.h"
 #include "wq.h"
@@ -32,6 +31,9 @@ char *server_files_directory;
 char *server_proxy_hostname;
 int server_proxy_port;
 
+
+pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 /*
  * Takes a stream (fd), and writes 404 HTTP response
@@ -260,11 +262,33 @@ void handle_proxy_request(int fd) {
   */
 }
 
+void *wait_and_serve(void *arg) {
+  void (*request_handler)(int) = arg;
+
+  while (1) {
+    int client_socket_number = wq_pop(&work_queue);
+    request_handler(client_socket_number);
+    close(client_socket_number);
+  }
+
+  // TODO: wtf do I actually return here??
+  return "anything?";
+}
+
 
 void init_thread_pool(int num_threads, void (*request_handler)(int)) {
-  /*
-   * TODO: Part of your solution for Task 2 goes here!
-   */
+  int ret;
+  int i;
+  pthread_t threads[num_threads];
+  wq_init(&work_queue, &mut, &cond);
+
+  for (i = 0; i < num_threads; i++) {
+    ret = pthread_create(&threads[i], NULL, &wait_and_serve, request_handler);
+    if (ret) {
+      fprintf(stderr, "Failed to create a thread: error %d: %s\n", errno, strerror(errno));
+      exit(errno);
+    }
+  }
 }
 
 /*
@@ -324,9 +348,7 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
         inet_ntoa(client_address.sin_addr),
         client_address.sin_port);
 
-    // TODO: Change me?
-    request_handler(client_socket_number);
-    close(client_socket_number);
+    wq_push(&work_queue, client_socket_number);
 
   }
 

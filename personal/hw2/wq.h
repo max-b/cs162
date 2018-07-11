@@ -15,10 +15,11 @@ typedef struct wq_item {
 typedef struct wq {
   int size;
   wq_item_t *head;
-  /* TODO: More stuff here, maybe? */
+  pthread_mutex_t *mut;
+  pthread_cond_t *cond;
 } wq_t;
 
-void wq_init(wq_t *wq);
+void wq_init(wq_t *wq, pthread_mutex_t *mut, pthread_cond_t *cond);
 void wq_push(wq_t *wq, int client_socket_fd);
 int wq_pop(wq_t *wq);
 
