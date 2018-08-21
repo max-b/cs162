@@ -11,10 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/epoll.h>
 #include <unistd.h>
 
 #include "libhttp.h"
@@ -33,7 +33,6 @@ char *server_files_directory;
 char *server_proxy_hostname;
 int server_proxy_port;
 int READ_SIZE = 1024;
-
 
 pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -80,16 +79,17 @@ void send_dir_listing(int fd, char *path) {
   sprintf(formatted_path, "<h2>contents of %s </h2>", path);
   http_send_string(fd, formatted_path);
 
-  while((d = readdir(dir))) {
+  while ((d = readdir(dir))) {
 
-    sprintf(formatted_path, "<h3><a href=\"%s\">%s</a></h3>", d->d_name, d->d_name);
+    sprintf(formatted_path, "<h3><a href=\"%s\">%s</a></h3>", d->d_name,
+            d->d_name);
     http_send_string(fd, formatted_path);
   }
 
-
   ret = closedir(dir);
   if (ret) {
-    fprintf(stderr, "Error in closedir: error %d: %s\n", errno, strerror(errno));
+    fprintf(stderr, "Error in closedir: error %d: %s\n", errno,
+            strerror(errno));
   }
 }
 
@@ -102,7 +102,8 @@ void send_file_response(int fd, char *path) {
   int ret;
   FILE *file;
   char buf[READ_SIZE];
-  char file_length[64]; // File size must be less than 10^64 bytes (seems safe...)
+  char file_length[64]; // File size must be less than 10^64 bytes (seems
+                        // safe...)
   int nr;
   char *mimetype = http_get_mime_type(path);
 
@@ -113,7 +114,7 @@ void send_file_response(int fd, char *path) {
     return;
   }
 
-  fprintf(stdout, "File size: %d\n", (int) sb.st_size);
+  fprintf(stdout, "File size: %d\n", (int)sb.st_size);
   sprintf(file_length, "%ld", sb.st_size);
 
   file = fopen(path, "r");
@@ -157,17 +158,21 @@ void handle_files_request(int fd) {
     char relative_path[PATH_MAX] = "./files";
     char index_path[PATH_MAX];
 
-    strncat(relative_path, request->path, PATH_MAX - 19); // 19 to support 8 bytes from  "./files" and 11 bytes from "/index.html"
+    strncat(relative_path, request->path,
+            PATH_MAX - 19); // 19 to support 8 bytes from  "./files" and 11
+                            // bytes from "/index.html"
 
     ret = stat(relative_path, &sb);
 
     if (ret) {
       if (errno == ENOENT) {
         // Respond with 404
-        fprintf(stdout, "Sending not found response for path: %s\n", relative_path);
+        fprintf(stdout, "Sending not found response for path: %s\n",
+                relative_path);
         send_not_found_response(fd);
       } else {
-        fprintf(stderr, "Cannot stat path: error %d: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Cannot stat path: error %d: %s\n", errno,
+                strerror(errno));
         send_error_response(fd);
       }
     } else if (S_ISDIR(sb.st_mode)) {
@@ -184,7 +189,8 @@ void handle_files_request(int fd) {
         if (errno == ENOENT) {
           send_dir_listing(fd, relative_path);
         } else {
-          fprintf(stderr, "Cannot stat path: error %d: %s\n", errno, strerror(errno));
+          fprintf(stderr, "Cannot stat path: error %d: %s\n", errno,
+                  strerror(errno));
           send_error_response(fd);
         }
       } else {
@@ -221,7 +227,8 @@ void poll_and_proxy(int client_fd, int target_fd) {
   int num_events = 1;
 
   if (epfd < 0) {
-    fprintf(stderr, "Error creating epoll fd: error: %d: %s\n", errno, strerror(errno));
+    fprintf(stderr, "Error creating epoll fd: error: %d: %s\n", errno,
+            strerror(errno));
     exit(errno);
   }
 
@@ -233,7 +240,8 @@ void poll_and_proxy(int client_fd, int target_fd) {
   ret = epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &client_event);
 
   if (ret) {
-    fprintf(stderr, "Error adding client fd to epoll: error: %d: %s\n", errno, strerror(errno));
+    fprintf(stderr, "Error adding client fd to epoll: error: %d: %s\n", errno,
+            strerror(errno));
     exit(errno);
   }
 
@@ -245,12 +253,13 @@ void poll_and_proxy(int client_fd, int target_fd) {
   ret = epoll_ctl(epfd, EPOLL_CTL_ADD, target_fd, &target_event);
 
   if (ret) {
-    fprintf(stderr, "Error adding target fd to epoll: error: %d: %s\n", errno, strerror(errno));
+    fprintf(stderr, "Error adding target fd to epoll: error: %d: %s\n", errno,
+            strerror(errno));
     exit(errno);
   }
 
   struct epoll_event *incoming_events;
-  incoming_events = malloc (sizeof (struct epoll_event) * num_events);
+  incoming_events = malloc(sizeof(struct epoll_event) * num_events);
   int read_fd, write_fd;
   int bytes_read;
 
@@ -266,7 +275,8 @@ void poll_and_proxy(int client_fd, int target_fd) {
     fprintf(stdout, "nr_events: %d\n", nr_events);
 
     if (ret < 0) {
-      fprintf(stderr, "Error running epoll_wait: error: %d: %s\n", errno, strerror(errno));
+      fprintf(stderr, "Error running epoll_wait: error: %d: %s\n", errno,
+              strerror(errno));
       free(incoming_events);
       exit(errno);
     }
@@ -291,17 +301,20 @@ void poll_and_proxy(int client_fd, int target_fd) {
           fprintf(stderr, "Recieved EOF from fd %d", read_fd);
         } else {
           // error on the socket - we should close and return
-          fprintf(stderr, "Error from read: error: %d: %s\n", errno, strerror(errno));
+          fprintf(stderr, "Error from read: error: %d: %s\n", errno,
+                  strerror(errno));
         }
         free(read_buffer);
         free(incoming_events);
         return;
       }
-     } else {
-      fprintf(stdout, "going to write %d bytes:\n%s\n", bytes_read, read_buffer);
+    } else {
+      fprintf(stdout, "going to write %d bytes:\n%s\n", bytes_read,
+              read_buffer);
       ret = write(write_fd, read_buffer, bytes_read);
       if (ret < 0) {
-        fprintf(stderr, "Error running write: error: %d: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Error running write: error: %d: %s\n", errno,
+                strerror(errno));
         // error on the socket - we should close and return
         free(read_buffer);
         free(incoming_events);
@@ -334,11 +347,13 @@ void handle_proxy_request(int client_fd) {
   target_address.sin_family = AF_INET;
   target_address.sin_port = htons(server_proxy_port);
 
-  struct hostent *target_dns_entry = gethostbyname2(server_proxy_hostname, AF_INET);
+  struct hostent *target_dns_entry =
+      gethostbyname2(server_proxy_hostname, AF_INET);
 
   int target_socket_fd = socket(PF_INET, SOCK_STREAM, 0);
   if (target_socket_fd == -1) {
-    fprintf(stderr, "Failed to create a new socket: error %d: %s\n", errno, strerror(errno));
+    fprintf(stderr, "Failed to create a new socket: error %d: %s\n", errno,
+            strerror(errno));
     exit(errno);
   }
 
@@ -349,9 +364,11 @@ void handle_proxy_request(int client_fd) {
 
   char *dns_address = target_dns_entry->h_addr_list[0];
 
-  memcpy(&target_address.sin_addr, dns_address, sizeof(target_address.sin_addr));
-  int connection_status = connect(target_socket_fd, (struct sockaddr*) &target_address,
-      sizeof(target_address));
+  memcpy(&target_address.sin_addr, dns_address,
+         sizeof(target_address.sin_addr));
+  int connection_status =
+      connect(target_socket_fd, (struct sockaddr *)&target_address,
+              sizeof(target_address));
 
   if (connection_status < 0) {
     /* Dummy request parsing, just to be compliant. */
@@ -360,17 +377,15 @@ void handle_proxy_request(int client_fd) {
     http_start_response(client_fd, 502);
     http_send_header(client_fd, "Content-Type", "text/html");
     http_end_headers(client_fd);
-    http_send_string(client_fd, "<center><h1>502 Bad Gateway</h1><hr></center>");
+    http_send_string(client_fd,
+                     "<center><h1>502 Bad Gateway</h1><hr></center>");
     return;
-
   }
 
   poll_and_proxy(client_fd, target_socket_fd);
   close(client_fd);
   close(target_socket_fd);
-
 }
-
 
 void *wait_and_serve(void *arg) {
   void (*request_handler)(int) = arg;
@@ -385,7 +400,6 @@ void *wait_and_serve(void *arg) {
   return "anything?";
 }
 
-
 void init_thread_pool(int num_threads, void (*request_handler)(int)) {
   int ret;
   int i;
@@ -395,7 +409,8 @@ void init_thread_pool(int num_threads, void (*request_handler)(int)) {
   for (i = 0; i < num_threads; i++) {
     ret = pthread_create(&threads[i], NULL, &wait_and_serve, request_handler);
     if (ret) {
-      fprintf(stderr, "Failed to create a thread: error %d: %s\n", errno, strerror(errno));
+      fprintf(stderr, "Failed to create a thread: error %d: %s\n", errno,
+              strerror(errno));
       exit(errno);
     }
   }
@@ -420,7 +435,7 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
 
   int socket_option = 1;
   if (setsockopt(*socket_number, SOL_SOCKET, SO_REUSEADDR, &socket_option,
-        sizeof(socket_option)) == -1) {
+                 sizeof(socket_option)) == -1) {
     perror("Failed to set socket options");
     exit(errno);
   }
@@ -430,8 +445,8 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
   server_address.sin_addr.s_addr = INADDR_ANY;
   server_address.sin_port = htons(server_port);
 
-  if (bind(*socket_number, (struct sockaddr *) &server_address,
-        sizeof(server_address)) == -1) {
+  if (bind(*socket_number, (struct sockaddr *)&server_address,
+           sizeof(server_address)) == -1) {
     perror("Failed to bind on socket");
     exit(errno);
   }
@@ -446,17 +461,16 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
   init_thread_pool(num_threads, request_handler);
 
   while (1) {
-    client_socket_number = accept(*socket_number,
-        (struct sockaddr *) &client_address,
-        (socklen_t *) &client_address_length);
+    client_socket_number =
+        accept(*socket_number, (struct sockaddr *)&client_address,
+               (socklen_t *)&client_address_length);
     if (client_socket_number < 0) {
       perror("Error accepting socket");
       continue;
     }
 
     printf("Accepted connection from %s on port %d\n",
-        inet_ntoa(client_address.sin_addr),
-        client_address.sin_port);
+           inet_ntoa(client_address.sin_addr), client_address.sin_port);
 
     wq_push(&work_queue, client_socket_number);
   }
@@ -469,13 +483,15 @@ int server_fd;
 void signal_callback_handler(int signum) {
   printf("Caught signal %d: %s\n", signum, strsignal(signum));
   printf("Closing socket %d\n", server_fd);
-  if (close(server_fd) < 0) perror("Failed to close server_fd (ignoring)\n");
+  if (close(server_fd) < 0)
+    perror("Failed to close server_fd (ignoring)\n");
   exit(0);
 }
 
 char *USAGE =
-  "Usage: ./httpserver --files www_directory/ --port 8000 [--num-threads 5]\n"
-  "       ./httpserver --proxy inst.eecs.berkeley.edu:80 --port 8000 [--num-threads 5]\n";
+    "Usage: ./httpserver --files www_directory/ --port 8000 [--num-threads 5]\n"
+    "       ./httpserver --proxy inst.eecs.berkeley.edu:80 --port 8000 "
+    "[--num-threads 5]\n";
 
 void exit_with_usage() {
   fprintf(stderr, "%s", USAGE);

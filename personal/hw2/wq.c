@@ -1,7 +1,7 @@
-#include <stdlib.h>
-#include <stdio.h>
 #include "wq.h"
 #include "utlist.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 /* Initializes a work queue WQ. */
 void wq_init(wq_t *wq, pthread_mutex_t *mut, pthread_cond_t *cond) {
