@@ -24,6 +24,10 @@
    that are ready to run but not actually running. */
 static struct list ready_list;
 
+/* List of processes in THREAD_SLEEPING state, that is, processes
+   that are waiting for a time to be woken up. */
+static struct list sleeping_list;
+
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
@@ -46,6 +50,7 @@ struct kernel_thread_frame
   };
 
 /* Statistics. */
+static long long all_ticks;     /* # of timer ticks spent in any context. */
 static long long idle_ticks;    /* # of timer ticks spent idle. */
 static long long kernel_ticks;  /* # of timer ticks in kernel threads. */
 static long long user_ticks;    /* # of timer ticks in user programs. */
@@ -91,6 +96,7 @@ thread_init (void)
 
   lock_init (&tid_lock);
   list_init (&ready_list);
+  list_init (&sleeping_list);
   list_init (&all_list);
 
   /* Set up a thread structure for the running thread. */
@@ -125,6 +131,8 @@ thread_tick (void)
   struct thread *t = thread_current ();
 
   /* Update statistics. */
+  all_ticks++;
+
   if (t == idle_thread)
     idle_ticks++;
 #ifdef USERPROG
@@ -310,6 +318,27 @@ thread_yield (void)
   if (cur != idle_thread)
     list_push_back (&ready_list, &cur->elem);
   cur->status = THREAD_READY;
+  schedule ();
+  intr_set_level (old_level);
+}
+
+/* Sleeps for ticks amount of clock cycle
+   The current thread won't be put on the ready queue until then. */
+void thread_sleep (int64_t ticks)
+{
+  struct thread *cur = thread_current ();
+  enum intr_level old_level;
+
+  ASSERT (!intr_context ());
+
+  old_level = intr_disable ();
+  if (cur != idle_thread)
+    {
+      list_push_back (&sleeping_list, &cur->sleeping_elem);
+      cur->status = THREAD_SLEEPING;
+      cur->time_to_wake = (uint64_t) ticks + (uint64_t) all_ticks;
+    }
+
   schedule ();
   intr_set_level (old_level);
 }
@@ -542,6 +571,31 @@ thread_schedule_tail (struct thread *prev)
     }
 }
 
+/* Checks the sleeping list for any thread whose time_to_wakeup has passed
+ * and puts them on the ready queue. */
+static void
+wakeup_sleepers (void)
+{
+  struct list_elem *e;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  for (e = list_begin (&sleeping_list); e != list_end (&sleeping_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, sleeping_elem);
+      ASSERT (t->status == THREAD_SLEEPING);
+
+      if ((uint64_t) all_ticks > t->time_to_wake)
+        {
+          list_remove (&t->sleeping_elem);
+          list_push_back (&ready_list, &t->elem);
+          t->time_to_wake = 0;
+          t->status = THREAD_READY;
+        }
+  }
+}
+
 /* Schedules a new process.  At entry, interrupts must be off and
    the running process's state must have been changed from
    running to some other state.  This function finds another
@@ -552,13 +606,20 @@ thread_schedule_tail (struct thread *prev)
 static void
 schedule (void)
 {
-  struct thread *cur = running_thread ();
-  struct thread *next = next_thread_to_run ();
-  struct thread *prev = NULL;
-
   ASSERT (intr_get_level () == INTR_OFF);
+
+  if (!list_empty (&sleeping_list))
+    {
+      wakeup_sleepers();
+    }
+
+  struct thread *cur = running_thread ();
   ASSERT (cur->status != THREAD_RUNNING);
+
+  struct thread *next = next_thread_to_run ();
   ASSERT (is_thread (next));
+
+  struct thread *prev = NULL;
 
   if (cur != next)
     prev = switch_threads (cur, next);
