@@ -7,12 +7,14 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/epoll.h>
 #include <unistd.h>
 
 #include "libhttp.h"
@@ -30,6 +32,7 @@ int server_port;
 char *server_files_directory;
 char *server_proxy_hostname;
 int server_proxy_port;
+int READ_SIZE = 1024;
 
 
 pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
@@ -98,7 +101,6 @@ void send_file_response(int fd, char *path) {
   struct stat sb;
   int ret;
   FILE *file;
-  int READ_SIZE = 1024;
   char buf[READ_SIZE];
   char file_length[64]; // File size must be less than 10^64 bytes (seems safe...)
   int nr;
@@ -150,58 +152,164 @@ void handle_files_request(int fd) {
 
   struct http_request *request = http_request_parse(fd);
 
-  char relative_path[PATH_MAX] = "./files";
-  char index_path[PATH_MAX];
+  if (request) {
 
-  strncat(relative_path, request->path, PATH_MAX - 19); // 19 to support 8 bytes from  "./files" and 11 bytes from "/index.html"
+    char relative_path[PATH_MAX] = "./files";
+    char index_path[PATH_MAX];
 
-  ret = stat(relative_path, &sb);
+    strncat(relative_path, request->path, PATH_MAX - 19); // 19 to support 8 bytes from  "./files" and 11 bytes from "/index.html"
 
-  if (ret) {
-    if (errno == ENOENT) {
-      // Respond with 404
-      fprintf(stdout, "Sending not found response for path: %s\n", relative_path);
-      send_not_found_response(fd);
-    } else {
-      fprintf(stderr, "Cannot stat path: error %d: %s\n", errno, strerror(errno));
-      send_error_response(fd);
-    }
-  } else if (S_ISDIR(sb.st_mode)) {
-    fprintf(stdout, "directory\n");
-    fprintf(stdout, "relative_path: %s\n", relative_path);
-
-    strcpy(index_path, relative_path);
-    strcat(index_path, "/index.html");
-
-    fprintf(stdout, "index path to check is: %s\n", index_path);
-    ret = stat(index_path, &sb);
+    ret = stat(relative_path, &sb);
 
     if (ret) {
       if (errno == ENOENT) {
-        send_dir_listing(fd, relative_path);
+        // Respond with 404
+        fprintf(stdout, "Sending not found response for path: %s\n", relative_path);
+        send_not_found_response(fd);
       } else {
         fprintf(stderr, "Cannot stat path: error %d: %s\n", errno, strerror(errno));
         send_error_response(fd);
       }
-    } else {
-      if (S_ISREG(sb.st_mode)) {
-        fprintf(stdout, "Sending file response for path: %s\n", index_path);
-        send_file_response(fd, index_path);
+    } else if (S_ISDIR(sb.st_mode)) {
+      fprintf(stdout, "directory\n");
+      fprintf(stdout, "relative_path: %s\n", relative_path);
+
+      strcpy(index_path, relative_path);
+      strcat(index_path, "/index.html");
+
+      fprintf(stdout, "index path to check is: %s\n", index_path);
+      ret = stat(index_path, &sb);
+
+      if (ret) {
+        if (errno == ENOENT) {
+          send_dir_listing(fd, relative_path);
+        } else {
+          fprintf(stderr, "Cannot stat path: error %d: %s\n", errno, strerror(errno));
+          send_error_response(fd);
+        }
+      } else {
+        if (S_ISREG(sb.st_mode)) {
+          fprintf(stdout, "Sending file response for path: %s\n", index_path);
+          send_file_response(fd, index_path);
+        }
       }
+
+    } else if (S_ISREG(sb.st_mode)) {
+      // respond with file from relative_path
+      fprintf(stdout, "Regular file\n");
+      fprintf(stdout, "Sending file response for path: %s\n", relative_path);
+      send_file_response(fd, relative_path);
     }
 
-  } else if (S_ISREG(sb.st_mode)) {
-    // respond with file from relative_path
-    fprintf(stdout, "Regular file\n");
-    fprintf(stdout, "Sending file response for path: %s\n", relative_path);
-    send_file_response(fd, relative_path);
+    free(request->path);
+    free(request->method);
+    free(request);
+  } else {
+    fprintf(stderr, "http_request_parse returned null");
+    send_error_response(fd);
   }
-
-  free(request->path);
-  free(request->method);
-  free(request);
 }
 
+/*
+ * Takes a client fd and a proxy target fd
+ * and asynchronously polls, listening on each
+ * fd and then writing to the other
+ */
+void poll_and_proxy(int client_fd, int target_fd) {
+  int ret, nr_events;
+  int epfd = epoll_create(2);
+  int num_events = 1;
+
+  if (epfd < 0) {
+    fprintf(stderr, "Error creating epoll fd: error: %d: %s\n", errno, strerror(errno));
+    exit(errno);
+  }
+
+  struct epoll_event client_event;
+
+  client_event.data.fd = client_fd;
+  client_event.events = EPOLLIN;
+
+  ret = epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &client_event);
+
+  if (ret) {
+    fprintf(stderr, "Error adding client fd to epoll: error: %d: %s\n", errno, strerror(errno));
+    exit(errno);
+  }
+
+  struct epoll_event target_event;
+
+  target_event.data.fd = target_fd;
+  target_event.events = EPOLLIN;
+
+  ret = epoll_ctl(epfd, EPOLL_CTL_ADD, target_fd, &target_event);
+
+  if (ret) {
+    fprintf(stderr, "Error adding target fd to epoll: error: %d: %s\n", errno, strerror(errno));
+    exit(errno);
+  }
+
+  struct epoll_event *incoming_events;
+  incoming_events = malloc (sizeof (struct epoll_event) * num_events);
+  int read_fd, write_fd;
+  int bytes_read;
+
+  char *read_buffer = malloc(READ_SIZE + 1);
+  if (!read_buffer) {
+    fprintf(stderr, "Error in malloc: error: %d: %s\n", errno, strerror(errno));
+    exit(errno);
+  }
+
+  while (1) {
+    nr_events = epoll_wait(epfd, incoming_events, 1, -1);
+
+    fprintf(stdout, "nr_events: %d\n", nr_events);
+
+    if (ret < 0) {
+      fprintf(stderr, "Error running epoll_wait: error: %d: %s\n", errno, strerror(errno));
+      free(incoming_events);
+      exit(errno);
+    }
+
+    read_fd = incoming_events[0].data.fd;
+    if (read_fd == target_fd) {
+      write_fd = client_fd;
+    } else {
+      write_fd = target_fd;
+    }
+
+    errno = 0;
+    bytes_read = read(read_fd, read_buffer, READ_SIZE);
+
+    printf("bytes read = %d", bytes_read);
+
+    if (bytes_read <= 0) {
+      if (errno == EINTR) {
+        // fine to re-loop
+      } else {
+        if (bytes_read == 0) {
+          fprintf(stderr, "Recieved EOF from fd %d", read_fd);
+        } else {
+          // error on the socket - we should close and return
+          fprintf(stderr, "Error from read: error: %d: %s\n", errno, strerror(errno));
+        }
+        free(read_buffer);
+        free(incoming_events);
+        return;
+      }
+     } else {
+      fprintf(stdout, "going to write %d bytes:\n%s\n", bytes_read, read_buffer);
+      ret = write(write_fd, read_buffer, bytes_read);
+      if (ret < 0) {
+        fprintf(stderr, "Error running write: error: %d: %s\n", errno, strerror(errno));
+        // error on the socket - we should close and return
+        free(read_buffer);
+        free(incoming_events);
+        return;
+      }
+    }
+  }
+}
 
 /*
  * Opens a connection to the proxy target (hostname=server_proxy_hostname and
@@ -214,7 +322,7 @@ void handle_files_request(int fd) {
  *   | client | <-> | httpserver | <-> | proxy target |
  *   +--------+     +------------+     +--------------+
  */
-void handle_proxy_request(int fd) {
+void handle_proxy_request(int client_fd) {
 
   /*
   * The code below does a DNS lookup of server_proxy_hostname and
@@ -228,8 +336,8 @@ void handle_proxy_request(int fd) {
 
   struct hostent *target_dns_entry = gethostbyname2(server_proxy_hostname, AF_INET);
 
-  int client_socket_fd = socket(PF_INET, SOCK_STREAM, 0);
-  if (client_socket_fd == -1) {
+  int target_socket_fd = socket(PF_INET, SOCK_STREAM, 0);
+  if (target_socket_fd == -1) {
     fprintf(stderr, "Failed to create a new socket: error %d: %s\n", errno, strerror(errno));
     exit(errno);
   }
@@ -242,25 +350,27 @@ void handle_proxy_request(int fd) {
   char *dns_address = target_dns_entry->h_addr_list[0];
 
   memcpy(&target_address.sin_addr, dns_address, sizeof(target_address.sin_addr));
-  int connection_status = connect(client_socket_fd, (struct sockaddr*) &target_address,
+  int connection_status = connect(target_socket_fd, (struct sockaddr*) &target_address,
       sizeof(target_address));
 
   if (connection_status < 0) {
     /* Dummy request parsing, just to be compliant. */
-    http_request_parse(fd);
+    http_request_parse(client_fd);
 
-    http_start_response(fd, 502);
-    http_send_header(fd, "Content-Type", "text/html");
-    http_end_headers(fd);
-    http_send_string(fd, "<center><h1>502 Bad Gateway</h1><hr></center>");
+    http_start_response(client_fd, 502);
+    http_send_header(client_fd, "Content-Type", "text/html");
+    http_end_headers(client_fd);
+    http_send_string(client_fd, "<center><h1>502 Bad Gateway</h1><hr></center>");
     return;
 
   }
 
-  /* 
-  * TODO: Your solution for task 3 belongs here! 
-  */
+  poll_and_proxy(client_fd, target_socket_fd);
+  close(client_fd);
+  close(target_socket_fd);
+
 }
+
 
 void *wait_and_serve(void *arg) {
   void (*request_handler)(int) = arg;
@@ -349,7 +459,6 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
         client_address.sin_port);
 
     wq_push(&work_queue, client_socket_number);
-
   }
 
   shutdown(*socket_number, SHUT_RDWR);
